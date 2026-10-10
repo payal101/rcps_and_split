@@ -1,6 +1,8 @@
 # Tutorial: RCPS on the small LoDoPaB-derived dataset
 
-This guide explains the **RCPS (risk-controlling prediction set)** experiment in [`lodopab_colab_small_subset.ipynb`](lodopab_colab_small_subset.ipynb). The notebook trains an image reconstruction model, chooses an interval radius using calibration images, then checks whether it can certify a requested image-level miss risk.
+This guide explains the **RCPS (risk-controlling prediction set)** experiment in [`lodopab_small_subset_rcps.ipynb`](lodopab_small_subset_rcps.ipynb).
+
+There are now two standalone notebooks using the same small LoDoPaB-derived data and reconstruction setup: [`lodopab_small_subset_rcps.ipynb`](lodopab_small_subset_rcps.ipynb) for RCPS and [`lodopab_small_subset_split_conformal.ipynb`](lodopab_small_subset_split_conformal.ipynb) for split conformal. This guide explains the RCPS notebook. The notebook trains an image reconstruction model, chooses an interval radius using calibration images, then checks whether it can certify a requested image-level miss risk.
 
 ## In one sentence
 
@@ -50,15 +52,23 @@ The 300 calibration images are randomly divided into 150 **optimization** images
 
 This extra split is needed here because RCPS selects a setting and then needs separate data to certify its risk. Reusing the same observations for both selection and certification would invalidate this simple bound.
 
-### 5. Compute the risk upper bound
+### 5. Four terms to keep separate
 
-For a chosen `lambda`, let `n` be the number of risk-check images and `r_hat` their mean image-level loss. The notebook uses the one-sided Hoeffding bound
+**Image-level miss risk, `R(lambda)`:** For a fixed model and radius, this is the probability that one image drawn from the target population has at least one pixel outside its interval. It is a population quantity, not the observed test-set percentage.
 
-`risk upper bound = min(1, r_hat + sqrt(log(1/delta) / (2*n)))`.
+**Epsilon, `epsilon`:** The largest miss risk we are willing to allow. For example, `epsilon = 0.10` means the goal is `R(lambda) <= 0.10`; in population terms, at least 90% of images should have all pixels covered. Epsilon is about the performance on images drawn from the population.
 
-Here `delta = 0.10`, so the bound has 90% confidence under the sampling assumptions below. The result is called **certified** for target `epsilon` only if this upper bound is at most `epsilon`.
+**Delta, `delta`, and confidence:** Delta is the allowed chance that the calibration procedure fails to produce an upper bound that is above the true `R(lambda)`. The confidence level is `1 - delta`. Here `delta = 0.10` means 90% confidence. This is about repeated risk-check calibration samples, not the percentage of images covered.
 
-The optimization step looks for a narrow radius whose optimization-half risk leaves room for this Hoeffding margin. If the margin is too large, an epsilon may be impossible to certify with the available calibration sample. That is a meaningful result: it says this sample and bound do not establish the requested risk level.
+**RCPS upper bound:** This is the number computed from the risk-check images. If `n` is their count and `r_hat` is their observed mean image-level miss loss, the notebook computes
+
+`UCB = min(1, r_hat + sqrt(log(1/delta) / (2*n)))`.
+
+The upper bound is an estimate with a confidence statement attached; it is **not another name for epsilon or confidence**. The notebook says a radius is **certified for epsilon** only when `UCB <= epsilon`.
+
+For example, if `epsilon = 0.10`, `delta = 0.10`, and the computed upper bound is `0.08`, the result is certified: with 90% confidence from the risk-check sample, the population whole-image miss risk is at most 10%. If the upper bound is `0.13`, it is not certified for epsilon 0.10. That does not prove the true risk is above 10%; it means this calibration result did not establish that it is below 10%.
+
+The optimization step chooses a narrow radius using the separate optimization half. The Hoeffding margin can be large with only 150 risk-check images. In this notebook it is about 0.088, so the requested risks 0.01 or 0.05 cannot be certified by this bound and sample size—even if the observed risk-check miss rate is zero. That is a limitation of the available evidence, not proof that the actual miss risk is that high.
 
 ### 6. Evaluate on untouched test images
 
@@ -73,19 +83,19 @@ It also plots a test reconstruction, interval width, and missed pixels for an ex
 
 ## What guarantee is being targeted?
 
-For a radius selected using the optimization half, the separate risk-check half gives a high-confidence upper bound on the probability that a future image has **at least one pixel outside its interval**. A certified line means the computed upper bound is no larger than the requested `epsilon`.
+The RCPS statement is: for a radius selected using the optimization half, the separate risk-check half gives an upper confidence bound on the probability that an image from the target population has **at least one pixel outside its interval**. A certified line means `UCB <= epsilon`. The confidence statement concerns repeated risk-check samples; the risk concerns one image drawn from the population. Neither says every image will be covered.
 
 The simple Hoeffding calculation treats the image-level losses in the risk-check sample as independent, identically distributed, bounded observations from the same population as the future image. It does not require pixels within an image to be independent: all pixels have already been combined into one binary loss for that image. However, dependence between images—for example, multiple images from the same patient—can undermine this independence assumption. Since this subset copy has no documented patient IDs, interpret the result as an image-level exploratory stress test, not a patient-level medical guarantee.
 
 ## RCPS and split conformal are different
 
-The notebook also contains an ordinary split-conformal calculation as a comparison. It uses the same maximum-pixel score but selects its threshold by a conformal order statistic. Split conformal targets marginal coverage under exchangeability of calibration and future examples.
+The notebook also contains an ordinary split-conformal calculation as a comparison. It uses the same maximum-pixel score but selects its threshold by a conformal order statistic. Its `alpha` is a nominal miscoverage level: for example, `alpha = 0.10` targets 90% marginal whole-image coverage under exchangeability of calibration and future examples. This `alpha` is separate from RCPS `epsilon` and `delta`.
 
-The RCPS section answers a different question: *Can this chosen interval rule be certified to have image-level miss risk at most `epsilon`, with confidence `1 - delta`?* Its Hoeffding certificate uses independent image-level losses and spends calibration data between selection and risk checking. Do not treat the two outputs as the same guarantee.
+The RCPS section asks: *Does the computed upper bound fall at or below the allowed miss risk `epsilon`?* It uses `delta` to specify the confidence of that bound and splits calibration data between radius selection and risk checking. Do not read the conformal `alpha` column as RCPS confidence or RCPS risk.
 
 ## Running in Google Colab
 
-1. Open [`lodopab_colab_small_subset.ipynb`](lodopab_colab_small_subset.ipynb) in Colab.
+1. Open [`lodopab_small_subset_rcps.ipynb`](lodopab_small_subset_rcps.ipynb) in Colab.
 2. Choose **Runtime → Change runtime type → GPU** if a GPU is available. The notebook also supports CPU, but processing the simulated projections will take longer.
 3. Run the cells from top to bottom. The first cell installs the needed packages; the next downloads the subset.
 4. Read the RCPS output table separately from the split-conformal table. Check whether `risk upper bound <= epsilon` before calling an RCPS result certified.
