@@ -1,103 +1,159 @@
-# Tutorial: RCPS on the small LoDoPaB-derived dataset
+# RCPS on the small LoDoPaB-derived dataset
 
-This guide explains the **RCPS (risk-controlling prediction set)** experiment in [`lodopab_small_subset_rcps.ipynb`](lodopab_small_subset_rcps.ipynb).
+This README explains the RCPS experiment in [`lodopab_small_subset_rcps.ipynb`](lodopab_small_subset_rcps.ipynb), including the image-level loss, the risk target, the confidence bound, and how the notebook decides whether a result is certified.
 
-There are now two standalone notebooks using the same small LoDoPaB-derived data and reconstruction setup: [`lodopab_small_subset_rcps.ipynb`](lodopab_small_subset_rcps.ipynb) for RCPS and [`lodopab_small_subset_split_conformal.ipynb`](lodopab_small_subset_split_conformal.ipynb) for split conformal. This guide explains the RCPS notebook. The notebook trains an image reconstruction model, chooses an interval radius using calibration images, then checks whether it can certify a requested image-level miss risk.
+## 1. Data and prediction model
 
-## In one sentence
+Each example is an input image `X` and a clean target image `Y`. The notebook uses 700 examples to train a CNN reconstruction model
 
-For a new CT image, the model predicts a reconstruction and places a uniform interval around every pixel; RCPS chooses the interval radius so that, with a stated confidence level, the probability that **any pixel is missed** is at most a target risk `epsilon`.
+$$
+\hat{Y} = f(X),
+$$
 
-## What data does it use?
+where `f(X)` is the predicted image. The model is trained before calibration; the calibration and test images are not used to fit its weights.
 
-The notebook downloads a small LoDoPaB-derived image subset from a Hugging Face copy associated with GLIMPSE. It uses 700 images for fitting the reconstruction model, 300 for RCPS calibration, and 100 untouched images for final evaluation.
+The target images come from a small LoDoPaB-derived subset mirrored by GLIMPSE. The notebook creates inputs by simulating 50-view sinograms, adding Gaussian noise, and applying filtered back projection. Thus, targets are real dataset images, but the inputs are simulated, not the official LoDoPaB measurement files. The subset copy does not document patient IDs.
 
-The clean target images come from the LoDoPaB-derived subset. For each target, the notebook **simulates** a new 50-view sinogram, adds Gaussian noise, and reconstructs an FBP input. Therefore, the experiment uses real CT image targets, but its inputs are simulated; these are not the official LoDoPaB low-dose measurements. The copy also does not document patient IDs, so the notebook cannot enforce or verify patient-level separation.
+## 2. Pixel intervals and image-level score
 
-## The workflow
+For a candidate radius $\lambda \geq 0$, the prediction set for image $X_i$ is a band around the predicted image. At pixel $j$:
 
-### 1. Make paired input and target images
+$$
+\ell_{ij}(\lambda) = \max(0, \hat{Y}_{ij} - \lambda), \qquad
+u_{ij}(\lambda) = \min(1, \hat{Y}_{ij} + \lambda).
+$$
 
-Each clean image is `Y`. The notebook computes simulated sparse-view projections, adds noise, and applies filtered back projection (FBP) to create the degraded input `X`:
+Pixel $j$ is covered when
 
-`X = FBP(noisy 50-view projections of Y)`
+$$
+\ell_{ij}(\lambda) \leq Y_{ij} \leq u_{ij}(\lambda).
+$$
 
-### 2. Train the reconstruction model
+The notebook combines all pixels in one image into a single score:
 
-A small convolutional neural network is trained on the 700 fitting pairs `(X, Y)` using pixel-averaged mean squared error. It learns a central reconstruction `f(X)`. Training loss measures fit to the training images; it does **not** certify uncertainty or coverage.
+$$
+S_i = \max_{j=1,\ldots,d} \left|Y_{ij} - \hat{Y}_{ij}\right|,
+$$
 
-### 3. Define one score and one loss per image
+where $d$ is the number of pixels. The image-level loss for radius $\lambda$ is
 
-For each of the 300 calibration images, the notebook computes the largest absolute pixel residual:
+$$
+L_i(\lambda) = \mathbf{1}\{S_i > \lambda\}
+             = \mathbf{1}\{\text{at least one pixel in image }i\text{ is missed}\}.
+$$
 
-`S_i = max over pixels j of |Y_ij - f(X_i)_j|`
+So the notebook makes an interval at **every pixel**, but RCPS counts one binary loss per **image**. It does not require pixels within an image to be independent.
 
-For a candidate radius `lambda`, the interval at pixel `j` is
+## 3. Population miss risk and `epsilon`
 
-`[max(0, f(X_i)_j - lambda), min(1, f(X_i)_j + lambda)]`.
+For a fixed trained model and radius, define the population whole-image miss risk as
 
-The image-level loss is
+$$
+R(\lambda) = \mathbb{E}_{(X,Y)\sim P}[L(\lambda;X,Y)]
+            = \Pr_{(X,Y)\sim P}\!\left(\exists j:\,Y_j\notin[\ell_j(\lambda),u_j(\lambda)]\right).
+$$
 
-`L_i(lambda) = 1{S_i > lambda}`.
+This is the probability that **one image sampled from the target population** has any missed pixel. It is not the test-set fraction itself.
 
-It is 1 if **at least one pixel** in image `i` lies outside its interval, and 0 if every pixel is covered. This is a whole-image miss event, not an average pixel error or a fraction of missed pixels.
+`epsilon` is the largest population miss risk the experiment is asked to allow. For example,
 
-### 4. Split calibration into selection and risk-check portions
+$$
+\epsilon = 0.10 \quad\Longrightarrow\quad \text{target } R(\lambda) \leq 0.10,
+$$
 
-The 300 calibration images are randomly divided into 150 **optimization** images and 150 **risk-check** images.
+which corresponds to at least 90% of images being fully covered on average over the population. It does not promise that every image is covered.
 
-- The optimization half chooses a radius from a fixed grid. The radius is selected without using the risk-check outcomes.
-- The risk-check half is used once to estimate the selected radius's miss risk and compute an upper confidence bound.
-- The 100 test images are kept out of both steps. They provide empirical evaluation only.
+## 4. Calibration selection and risk check
 
-This extra split is needed here because RCPS selects a setting and then needs separate data to certify its risk. Reusing the same observations for both selection and certification would invalidate this simple bound.
+The notebook has 300 calibration images. It randomly splits them into:
 
-### 5. Four terms to keep separate
+- $C_{\mathrm{opt}}$: 150 images for selecting a radius;
+- $C_{\mathrm{risk}}$: 150 different images for checking the risk bound.
 
-**Image-level miss risk, `R(lambda)`:** For a fixed model and radius, this is the probability that one image drawn from the target population has at least one pixel outside its interval. It is a population quantity, not the observed test-set percentage.
+For each radius in a fixed grid $\Lambda$, the optimization half estimates
 
-**Epsilon, `epsilon`:** The largest miss risk we are willing to allow. For example, `epsilon = 0.10` means the goal is `R(lambda) <= 0.10`; in population terms, at least 90% of images should have all pixels covered. Epsilon is about the performance on images drawn from the population.
+$$
+\widehat{R}_{\mathrm{opt}}(\lambda)
+ = \frac{1}{n_{\mathrm{opt}}}\sum_{i\in C_{\mathrm{opt}}}L_i(\lambda).
+$$
 
-**Delta, `delta`, and confidence:** Delta is the allowed chance that the calibration procedure fails to produce an upper bound that is above the true `R(lambda)`. The confidence level is `1 - delta`. Here `delta = 0.10` means 90% confidence. This is about repeated risk-check calibration samples, not the percentage of images covered.
+The notebook selects the smallest grid radius whose optimization risk is at most $\max(0,\epsilon-h)$, where $h$ is the Hoeffding margin below. This selection does not use the risk-check outcomes.
 
-**RCPS upper bound:** This is the number computed from the risk-check images. If `n` is their count and `r_hat` is their observed mean image-level miss loss, the notebook computes
+## 5. Confidence, `delta`, and the RCPS upper bound
 
-`UCB = min(1, r_hat + sqrt(log(1/delta) / (2*n)))`.
+For the selected radius $\hat{\lambda}$, the risk-check half computes the empirical miss rate
 
-The upper bound is an estimate with a confidence statement attached; it is **not another name for epsilon or confidence**. The notebook says a radius is **certified for epsilon** only when `UCB <= epsilon`.
+$$
+\widehat{R}_{\mathrm{risk}}(\hat{\lambda})
+ = \frac{1}{n_{\mathrm{risk}}}\sum_{i\in C_{\mathrm{risk}}}L_i(\hat{\lambda}),
+$$
 
-For example, if `epsilon = 0.10`, `delta = 0.10`, and the computed upper bound is `0.08`, the result is certified: with 90% confidence from the risk-check sample, the population whole-image miss risk is at most 10%. If the upper bound is `0.13`, it is not certified for epsilon 0.10. That does not prove the true risk is above 10%; it means this calibration result did not establish that it is below 10%.
+and the one-sided Hoeffding upper bound
 
-The optimization step chooses a narrow radius using the separate optimization half. The Hoeffding margin can be large with only 150 risk-check images. In this notebook it is about 0.088, so the requested risks 0.01 or 0.05 cannot be certified by this bound and sample size—even if the observed risk-check miss rate is zero. That is a limitation of the available evidence, not proof that the actual miss risk is that high.
+$$
+U(\hat{\lambda}) = \min\!\left(1,
+\widehat{R}_{\mathrm{risk}}(\hat{\lambda}) +
+\sqrt{\frac{\log(1/\delta)}{2n_{\mathrm{risk}}}}\right).
+$$
 
-### 6. Evaluate on untouched test images
+The two settings have different meanings:
 
-For a selected radius, the notebook reports:
+- **`epsilon` is the allowed miss risk over images.** It says how small $R(\lambda)$ should be.
+- **`delta` is the allowed failure probability of the upper-bound procedure.** Confidence is $1-\delta$. With `delta = 0.10`, the bound has 90% confidence under the assumptions below.
+- **`U` is the computed upper bound.** It is neither `epsilon` nor confidence.
 
-- **Risk-check empirical risk:** fraction of risk-check images with at least one missed pixel.
-- **Risk upper bound:** the RCPS certificate; compare it with `epsilon`.
-- **Test coverage:** fraction of the 100 held-out images for which every pixel is inside the interval. This is an empirical diagnostic, not the certificate.
-- **Test mean width:** average interval width over test images and pixels. Wider intervals generally improve coverage but are less informative.
+The formal statement is
 
-It also plots a test reconstruction, interval width, and missed pixels for an example image. A mostly blank missed-pixel plot does not imply whole-image coverage: a single missed pixel makes that image a whole-image miss.
+$$
+\Pr_{C_{\mathrm{risk}}}\!\left(R(\hat{\lambda}) \leq U(\hat{\lambda})\right)
+\geq 1-\delta.
+$$
 
-## What guarantee is being targeted?
+This probability is over repeated fresh risk-check calibration samples, conditional on the trained model and the radius chosen using the separate optimization split. It is **not** a claim that $1-\delta$ of images are covered.
 
-The RCPS statement is: for a radius selected using the optimization half, the separate risk-check half gives an upper confidence bound on the probability that an image from the target population has **at least one pixel outside its interval**. A certified line means `UCB <= epsilon`. The confidence statement concerns repeated risk-check samples; the risk concerns one image drawn from the population. Neither says every image will be covered.
+The notebook labels the selected radius **certified for `epsilon`** only when
 
-The simple Hoeffding calculation treats the image-level losses in the risk-check sample as independent, identically distributed, bounded observations from the same population as the future image. It does not require pixels within an image to be independent: all pixels have already been combined into one binary loss for that image. However, dependence between images—for example, multiple images from the same patient—can undermine this independence assumption. Since this subset copy has no documented patient IDs, interpret the result as an image-level exploratory stress test, not a patient-level medical guarantee.
+$$
+U(\hat{\lambda}) \leq \epsilon.
+$$
 
-## RCPS and split conformal are different
+For example, if `epsilon = 0.10`, `delta = 0.10`, and $U=0.08$, the result says: “With 90% confidence from the risk-check sample, population whole-image miss risk is at most 10%.” If $U=0.13$, it is not certified for `epsilon = 0.10`; that does not prove the true risk is above 10%.
 
-The notebook also contains an ordinary split-conformal calculation as a comparison. It uses the same maximum-pixel score but selects its threshold by a conformal order statistic. Its `alpha` is a nominal miscoverage level: for example, `alpha = 0.10` targets 90% marginal whole-image coverage under exchangeability of calibration and future examples. This `alpha` is separate from RCPS `epsilon` and `delta`.
+## 6. Why this sample may not certify small risks
 
-The RCPS section asks: *Does the computed upper bound fall at or below the allowed miss risk `epsilon`?* It uses `delta` to specify the confidence of that bound and splits calibration data between radius selection and risk checking. Do not read the conformal `alpha` column as RCPS confidence or RCPS risk.
+Here $n_{\mathrm{risk}}=150$ and `delta = 0.10`, so
 
-## Running in Google Colab
+$$
+h = \sqrt{\frac{\log(10)}{300}} \approx 0.0876.
+$$
 
-1. Open [`lodopab_small_subset_rcps.ipynb`](lodopab_small_subset_rcps.ipynb) in Colab.
-2. Choose **Runtime → Change runtime type → GPU** if a GPU is available. The notebook also supports CPU, but processing the simulated projections will take longer.
-3. Run the cells from top to bottom. The first cell installs the needed packages; the next downloads the subset.
-4. Read the RCPS output table separately from the split-conformal table. Check whether `risk upper bound <= epsilon` before calling an RCPS result certified.
+Therefore, targets such as `epsilon = 0.01` and `0.05` cannot be certified by this bound and sample size, even if the risk-check sample has zero misses: the upper bound cannot be smaller than the margin $h$. “Not certified” means the available sample and bound did not establish the target; it does not prove the model's actual miss risk exceeds it.
 
-The subset is intentionally small for a cloud notebook. Results can vary with the random split and model training, and the test set has only 100 images, so test coverage estimates are coarse.
+## 7. Test-set metrics
+
+The 100 untouched test images are used only after selecting and checking the radius. If `inside[i,j]` is 1 when target pixel $j$ in test image $i$ is inside its interval, then:
+
+$$
+\text{pixel coverage}
+= \frac{1}{n_{\mathrm{test}}d}\sum_{i=1}^{n_{\mathrm{test}}}\sum_{j=1}^{d}\text{inside}_{ij},
+$$
+
+while
+
+$$
+\text{whole-image coverage}
+= \frac{1}{n_{\mathrm{test}}}\sum_{i=1}^{n_{\mathrm{test}}}
+\mathbf{1}\{\text{all pixels in image }i\text{ are inside their intervals}\}.
+$$
+
+The first fraction counts pixels; the second counts images. The test metrics are empirical diagnostics and are not used to select the radius or calculate the RCPS bound. The notebook also reports mean interval width and visualizes a test prediction, its width map, and missed pixels.
+
+## 8. Assumptions and limits
+
+The Hoeffding calculation assumes the per-image losses in the risk-check sample are independent, identically distributed, bounded observations from the same population as future images. The risk-check examples must also be separate from the data used to choose the radius. Pixels within an image may be dependent; they have already been combined into one image-level loss. Dependence between images, for example multiple images from one patient, may violate the independent-image assumption. The mirror has no documented patient IDs, so this notebook cannot verify patient-level independence or separation.
+
+This is an exploratory image-level stress test. Its simulated measurement inputs, small sample sizes, and missing patient metadata limit what can be concluded from the results.
+
+## Run in Google Colab
+
+Open [`lodopab_small_subset_rcps.ipynb`](lodopab_small_subset_rcps.ipynb), select **Runtime → Change runtime type → GPU** if available, and run all cells from top to bottom. CPU execution is possible but slower. The first cells install dependencies and download the small subset.
